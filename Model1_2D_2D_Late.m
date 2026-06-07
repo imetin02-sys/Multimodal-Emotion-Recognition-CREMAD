@@ -14,7 +14,7 @@ batchSize = 16; lr = 0.0001; maxEpochs = 40;
 
 fprintf('\n🚀 MODEL 1: 2D-CNN (Vis) + 2D-CNN (Aud) LATE FUSION BAŞLIYOR...\n\n');
 
-%% 2. SINIF BAZLI RASTGELE SPLIT (%80-%20)
+%% 2. ACTOR BASED SPLIT (%80-%20)
 classFolders = dir(imgBaseDir);
 classFolders = classFolders([classFolders.isdir] & ~ismember({classFolders.name}, {'.', '..'}));
 classNames = {classFolders.name};
