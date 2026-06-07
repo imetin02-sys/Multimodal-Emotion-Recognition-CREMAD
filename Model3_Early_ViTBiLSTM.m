@@ -1,4 +1,4 @@
-%% MODEL 3: ViT-Mixer (Visual) + BiLSTM (Audio MFCC) EARLY FUSION (RASTGELE BÖLME)
+%% MODEL 3: ViT-Mixer (Visual) + BiLSTM (Audio MFCC) EARLY FUSION 
 clear; clc; close all;
 
 %% 1. YOLLAR VE PARAMETRELER
@@ -16,7 +16,7 @@ batchSize = 16; lr = 0.0001; maxEpochs = 40;
 
 fprintf('\n🚀 MODEL 3: ViT + BiLSTM EARLY FUSION BAŞLIYOR (RASTGELE BÖLME)...\n\n');
 
-%% 2. SINIF BAZLI RASTGELE SPLIT (%80-%20)
+%% 2. Aktor bazli split (%80-%20)
 classFolders = dir(imgBaseDir);
 classFolders = classFolders([classFolders.isdir] & ~ismember({classFolders.name}, {'.', '..'}));
 classNames = {classFolders.name};
