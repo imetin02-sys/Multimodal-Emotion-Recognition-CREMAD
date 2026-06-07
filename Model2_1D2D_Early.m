@@ -1,4 +1,4 @@
-%% MODEL 2: 2D-CNN (Visual) + 1D-CNN (Audio MFCC) EARLY FUSION (RASTGELE BÖLME)
+%% MODEL 2: 2D-CNN (Visual) + 1D-CNN (Audio MFCC) EARLY FUSION 
 clear; clc; close all;
 
 %% 1. YOLLAR VE PARAMETRELER
