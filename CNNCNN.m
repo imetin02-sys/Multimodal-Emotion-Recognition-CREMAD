@@ -17,7 +17,7 @@ batchSize = 16; lr = 0.0001; maxEpochs = 40;
 
 fprintf('\n🚀 MODEL 2: 2D-CNN + 1D-CNN LATE FUSION BAŞLIYOR (RASTGELE BÖLME)...\n\n');
 
-%% 2. SINIF BAZLI RASTGELE SPLIT (%80-%20)
+%% 2. AKTOR BASED SPLIT (%80-%20)
 classFolders = dir(imgBaseDir);
 classFolders = classFolders([classFolders.isdir] & ~ismember({classFolders.name}, {'.', '..'}));
 classNames = {classFolders.name};
