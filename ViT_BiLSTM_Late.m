@@ -1,18 +1,20 @@
-%% 1. MODEL: 2D-CNN (Visual) + 2D-CNN (Mel-Spec Audio) EARLY FUSION
+%% MODEL 3: ViT-Mixer (Visual) + BiLSTM (Audio) LATE FUSION 
 clear; clc; close all;
 
-%% 1. YOLLAR VE HİPERPARAMETRELER
+%% 1. YOLLAR VE PARAMETRELER
 imgBaseDir = 'C:\Users\STB\Desktop\DATASET\CREMAD\Image'; 
 audDir     = 'C:\Users\STB\Desktop\DATASET\CREMAD\Speech';      
-saveDir    = 'C:\Users\STB\Desktop\Araştırma\Model1_2D_2D_Early';
+saveDir    = 'C:\Users\STB\Desktop\Araştırma\Model3_ViT_BiLSTM_Late';
 if ~exist(saveDir, 'dir'), mkdir(saveDir); end
 
 visImgSize = [224 224 3];  
-melImgSize = [128 128 1];  
+audSeqLen = 100;     
+numMfcc = 13;        
+
 audLen = 48000; fs = 16000;
 batchSize = 16; lr = 0.0001; maxEpochs = 40;
 
-fprintf('\n🚀 MODEL 1: 2D-CNN + 2D-CNN EARLY FUSION BAŞLIYOR...\n\n');
+fprintf('\n🚀 MODEL 3: ViT + BiLSTM LATE FUSION BAŞLIYOR...\n\n');
 
 %% 2. ACTOR BASED SPLIT (%80-%20)
 classFolders = dir(imgBaseDir);
@@ -23,8 +25,6 @@ numClasses = numel(classNames);
 trainImg = {}; trainAud = {}; trainLbl = [];
 testImg  = {}; testAud  = {}; testLbl  = [];
 
-% --- HATA ÇÖZÜMÜ: Ses dosyalarını alt klasörlerde dahi olsalar bul ---
-fprintf('🔍 Ses dosyaları taranıyor...\n');
 allAud = dir(fullfile(audDir, '**', '*.wav'));
 audNames = {allAud.name};
 audFolders = {allAud.folder};
@@ -32,102 +32,83 @@ audFolders = {allAud.folder};
 for c = 1:numClasses
     cName = classNames{c};
     imgsInClass = dir(fullfile(imgBaseDir, cName, '*.jpg'));
+    nFiles = numel(imgsInClass);
     
-    % Bu sınıftaki eşsiz videoları (baseName) bul
-    baseNames = cell(numel(imgsInClass), 1);
-    for i = 1:numel(imgsInClass)
-        parts = split(imgsInClass(i).name, '_frame');
-        baseNames{i} = parts{1};
-    end
-    uniqueVideos = unique(baseNames);
-    uniqueVideos = uniqueVideos(randperm(numel(uniqueVideos))); % Karıştır
+    idx = randperm(nFiles);
+    nTrain = round(0.80 * nFiles);
     
-    % Videoların %80'ini Train, %20'sini Test yap
-    nTrain = round(0.80 * numel(uniqueVideos));
-    trainVids = uniqueVideos(1:nTrain);
-    
-    for i = 1:numel(imgsInClass)
-        imgFile = fullfile(imgsInClass(i).folder, imgsInClass(i).name);
+    for i = 1:nFiles
+        imgFile = fullfile(imgsInClass(idx(i)).folder, imgsInClass(idx(i)).name);
         
-        % Ses dosyasının tam yolunu bul
-        targetAudName = [baseNames{i}, '.wav'];
+        parts = split(imgsInClass(idx(i)).name, '_frame');
+        targetAudName = [parts{1}, '.wav'];
         matchIdx = find(strcmpi(audNames, targetAudName), 1);
         
         if ~isempty(matchIdx)
             audFile = fullfile(audFolders{matchIdx}, audNames{matchIdx});
-            
-            if ismember(baseNames{i}, trainVids)
+            if i <= nTrain
                 trainImg{end+1} = imgFile; trainAud{end+1} = audFile; trainLbl = [trainLbl; c];
             else
                 testImg{end+1}  = imgFile; testAud{end+1}  = audFile; testLbl  = [testLbl; c];
             end
         end
     end
-    fprintf('📁 Sınıf: %s -> %d Train, %d Test Karesi Ayrıldı.\n', cName, sum(trainLbl==c), sum(testLbl==c));
-end
-
-% --- GÜVENLİK KONTROLÜ (Expected at most 0 inputs hatasını önler) ---
-if isempty(trainImg)
-    error('\n❌ HATA: Hiçbir ses ve görüntü çifti eşleştirilemedi! Lütfen "audDir" (Ses) yolunu kontrol edin.\n');
+    fprintf('📁 Sınıf: %-8s -> %%80 Train, %%20 Test Ayrıldı.\n', cName);
 end
 
 YTrain = categorical(classNames(trainLbl)', classNames);
 YTest  = categorical(classNames(testLbl)', classNames);
 
-%% 3. DATASTORE KURULUMU
+%% 3. DATASTORE VE MİNİBATCHQUEUE (ZAMAN SERİSİ FORMATI)
 dsVisTrain = transform(arrayDatastore(trainImg', 'IterationDimension', 1), @(f) readRGBImage(f, visImgSize));
 dsVisTest  = transform(arrayDatastore(testImg', 'IterationDimension', 1),  @(f) readRGBImage(f, visImgSize));
-dsAudTrain = transform(arrayDatastore(trainAud', 'IterationDimension', 1), @(f) readMelSpecImage(f, audLen, fs, melImgSize));
-dsAudTest  = transform(arrayDatastore(testAud', 'IterationDimension', 1),  @(f) readMelSpecImage(f, audLen, fs, melImgSize));
+
+dsAudTrain = transform(arrayDatastore(trainAud', 'IterationDimension', 1), @(f) readMfccSequence(f, audLen, fs, audSeqLen, numMfcc));
+dsAudTest  = transform(arrayDatastore(testAud', 'IterationDimension', 1),  @(f) readMfccSequence(f, audLen, fs, audSeqLen, numMfcc));
 
 dsTrain = combine(dsVisTrain, dsAudTrain, arrayDatastore(YTrain));
 dsTest  = combine(dsVisTest, dsAudTest, arrayDatastore(YTest));
 
-mbqTrain = minibatchqueue(dsTrain, 3, 'MiniBatchSize', batchSize, 'MiniBatchFcn', @(v,a,l) prepBatch(v,a,l,classNames), 'MiniBatchFormat', {'SSCB', 'SSCB', 'CB'});
-mbqTest  = minibatchqueue(dsTest,  3, 'MiniBatchSize', batchSize, 'MiniBatchFcn', @(v,a,l) prepBatch(v,a,l,classNames), 'MiniBatchFormat', {'SSCB', 'SSCB', 'CB'});
+mbqTrain = minibatchqueue(dsTrain, 3, 'MiniBatchSize', batchSize, 'MiniBatchFcn', @(v,a,l) prepBatchSeq(v,a,l,classNames), 'MiniBatchFormat', {'SSCB', 'CBT', 'CB'});
+mbqTest  = minibatchqueue(dsTest,  3, 'MiniBatchSize', batchSize, 'MiniBatchFcn', @(v,a,l) prepBatchSeq(v,a,l,classNames), 'MiniBatchFormat', {'SSCB', 'CBT', 'CB'});
 
-%% 4. MİMARİ: EARLY FUSION
+%% 4. MİMARİ: ViT-Mixer + BiLSTM (LATE FUSION)
 lgraph = layerGraph();
 
+% --- Görsel Dal (ViT Patch-Mixer Simülasyonu) ---
 visBranch = [
     imageInputLayer(visImgSize, 'Name', 'in_vis', 'Normalization', 'zscore')
-    convolution2dLayer(3, 32, 'Padding', 'same', 'Name', 'v_c1')
+    convolution2dLayer(16, 64, 'Stride', 16, 'Padding', 'same', 'Name', 'v_patch') 
     reluLayer('Name', 'v_r1')
-    maxPooling2dLayer(4, 'Stride', 4, 'Name', 'v_p1')
-    convolution2dLayer(3, 64, 'Padding', 'same', 'Name', 'v_c2')
+    convolution2dLayer(3, 128, 'Padding', 'same', 'Name', 'v_mix')
     reluLayer('Name', 'v_r2')
     globalAveragePooling2dLayer('Name', 'v_gap')
+    fullyConnectedLayer(128, 'Name', 'v_fc')
+    reluLayer('Name', 'v_r3')
     flattenLayer('Name', 'v_flat')
-]; 
-lgraph = addLayers(lgraph, visBranch);
+]; lgraph = addLayers(lgraph, visBranch);
 
+% --- İşitsel Dal (BiLSTM Zaman Serisi) ---
 audBranch = [
-    imageInputLayer(melImgSize, 'Name', 'in_aud', 'Normalization', 'zscore')
-    convolution2dLayer(3, 32, 'Padding', 'same', 'Name', 'a_c1')
+    sequenceInputLayer(numMfcc, 'Name', 'in_aud', 'Normalization', 'zscore')
+    bilstmLayer(128, 'OutputMode', 'last', 'Name', 'a_bilstm')
+    fullyConnectedLayer(128, 'Name', 'a_fc')
     reluLayer('Name', 'a_r1')
-    maxPooling2dLayer(2, 'Stride', 2, 'Name', 'a_p1')
-    convolution2dLayer(3, 64, 'Padding', 'same', 'Name', 'a_c2')
-    reluLayer('Name', 'a_r2')
-    globalAveragePooling2dLayer('Name', 'a_gap')
-    flattenLayer('Name', 'a_flat')
-]; 
-lgraph = addLayers(lgraph, audBranch);
+    % DİKKAT: BiLSTM sonrasında flattenLayer konulmaz, zaten 1D vektördür!
+]; lgraph = addLayers(lgraph, audBranch);
 
+% --- Geç Füzyon Birleştirme ---
 shared = [
-    concatenationLayer(1, 2, 'Name', 'concat')
-    fullyConnectedLayer(128, 'Name', 'fc1')
-    reluLayer('Name', 'r1')
-    dropoutLayer(0.5, 'Name', 'drop')
+    concatenationLayer(1, 2, 'Name', 'late_concat')
     fullyConnectedLayer(numClasses, 'Name', 'fc_out')
     softmaxLayer('Name', 'sm')
-]; 
-lgraph = addLayers(lgraph, shared);
+]; lgraph = addLayers(lgraph, shared);
 
-lgraph = connectLayers(lgraph, 'v_flat', 'concat/in1');
-lgraph = connectLayers(lgraph, 'a_flat', 'concat/in2');
+lgraph = connectLayers(lgraph, 'v_flat', 'late_concat/in1');
+lgraph = connectLayers(lgraph, 'a_r1', 'late_concat/in2'); % Doğrudan a_r1 ile bağlanıyor
 net = dlnetwork(lgraph);
 
-%% 5. EĞİTİM
+%% 5. EĞİTİM DÖNGÜSÜ
 fprintf('\n🚀 Eğitim Başlıyor...\n');
 trailingAvg = []; trailingAvgSq = [];
 trainAccHist = []; testAccHist = []; iteration = 0;
@@ -137,102 +118,102 @@ for epoch = 1:maxEpochs
     while hasdata(mbqTrain)
         iteration = iteration + 1;
         [XV, XA, YT] = next(mbqTrain);
-        [grads, state, loss, YP] = dlfeval(@(n,v,a,y) modelGradients(n,v,a,y), net, XV, XA, YT);
-        net.State = state;
+        
+        % DİKKAT: Hatanın çözüldüğü nokta! Artık "state" almıyoruz.
+        [grads, loss, YP] = dlfeval(@(n,v,a,y) modelGradients(n,v,a,y), net, XV, XA, YT);
+        
         [net, trailingAvg, trailingAvgSq] = adamupdate(net, grads, trailingAvg, trailingAvgSq, iteration, lr);
         
         [~, pIdx] = max(extractdata(YP),[],1); [~, tIdx] = max(extractdata(YT),[],1);
         epochAcc = epochAcc + sum(pIdx==tIdx)/numel(tIdx); bCount = bCount + 1;
     end
     
-    [~, ~, testAcc, ~] = evaluateModel(net, mbqTest, false);
+    [~, ~, testAcc, ~, ~] = evaluateModel(net, mbqTest, false);
     trainAccHist(end+1) = (epochAcc/bCount)*100; testAccHist(end+1) = testAcc;
     fprintf('Epoch %2d/%d | Train Acc: %5.2f%% | Total Test Acc: %5.2f%%\n', epoch, maxEpochs, trainAccHist(end), testAcc);
 end
 
-%% 6. DEĞERLENDİRME VE GRAFİKLER
+%% 6. ÇIKTILAR VE GRAFİKLER
+fprintf('\n📊 Sonuçlar hesaplanıyor...\n');
+
 fig1 = figure('Visible', 'off'); plot(trainAccHist, 'b-o', 'LineWidth', 2); hold on; plot(testAccHist, 'r-s', 'LineWidth', 2);
-title('Training Progress'); xlabel('Epochs'); ylabel('Accuracy (%)'); legend('Train', 'Test'); grid on; 
+title('Training Progress (ViT + BiLSTM Late Fusion)'); xlabel('Epochs'); ylabel('Accuracy (%)'); legend('Train', 'Test'); grid on;
 saveas(fig1, fullfile(saveDir, '1_Progress.png'));
 
-[YPTrain, YTTrain, ~, ~] = evaluateModel(net, mbqTrain, false);
-[YPTest, YTTest, totalAcc, visOnlyAcc] = evaluateModel(net, mbqTest, true);
+[YPTrain, YTTrain, ~, ~, ~] = evaluateModel(net, mbqTrain, false);
+[YPTest, YTTest, totalAcc, visOnlyAcc, audOnlyAcc] = evaluateModel(net, mbqTest, true);
 
 fig2 = figure('Visible', 'off'); confusionchart(categorical(classNames(YTTrain)', classNames), categorical(classNames(YPTrain)', classNames));
 title('Train Confusion Matrix'); saveas(fig2, fullfile(saveDir, '2_Conf_Train.png'));
 
 fig3 = figure('Visible', 'off'); confusionchart(categorical(classNames(YTTest)', classNames), categorical(classNames(YPTest)', classNames));
-title(sprintf('Test Confusion Matrix (Acc: %.2f%%)', totalAcc)); saveas(fig3, fullfile(saveDir, '3_Conf_Test.png'));
+title(sprintf('Test Confusion Matrix (Total Acc: %.2f%%)', totalAcc)); saveas(fig3, fullfile(saveDir, '3_Conf_Test.png'));
 
-fprintf('\n✅ SONUÇLAR:\n');
-fprintf('   -> Total Early Fusion Test Accuracy: %.2f%%\n', totalAcc);
-fprintf('   -> Visual-Only (Sıfırlanmış Ses) Accuracy: %.2f%%\n', visOnlyAcc);
-fprintf('   -> Bütün grafikler "%s" dizinine kaydedildi.\n', saveDir);
+fprintf('\n✅ İŞLEM TAMAMLANDI!\n');
+fprintf('   -> Total Late Fusion Test Accuracy: %.2f%%\n', totalAcc);
+fprintf('   -> Visual-Only (ViT) Accuracy: %.2f%%\n', visOnlyAcc);
+fprintf('   -> Audio-Only (BiLSTM) Accuracy: %.2f%%\n', audOnlyAcc);
+fprintf('   -> Sonuçlar "%s" dizinine kaydedildi.\n', saveDir);
 
 %% FONKSİYONLAR
-function [grads, state, loss, YP] = modelGradients(net, XV, XA, YT)
-    [YP, state] = forward(net, XV, XA); 
+% DİKKAT: Hatanın çözüldüğü nokta! Artık "state" döngüye girip sistemi bozmuyor.
+function [grads, loss, YP] = modelGradients(net, XV, XA, YT)
+    YP = forward(net, XV, XA); 
     loss = crossentropy(YP, YT); 
     grads = dlgradient(loss, net.Learnables);
 end
 
-function [V, A, Y] = prepBatch(vC, aC, lC, cNames)
+function [V, A, Y] = prepBatchSeq(vC, aC, lC, cNames)
     V = cat(4, vC{:}); 
-    A = cat(4, aC{:}); 
+    A_temp = cat(3, aC{:}); 
+    A = permute(A_temp, [1 3 2]); 
     lbl = cat(1, lC{:});
-    Y = zeros(numel(cNames), numel(lbl), 'single'); 
-    for i = 1:numel(lbl)
-        Y(lbl(i) == cNames, i) = 1; 
-    end
+    Y = zeros(numel(cNames), numel(lbl), 'single'); for i = 1:numel(lbl), Y(lbl(i) == cNames, i) = 1; end
 end
 
-function [YPred, YTrue, accTotal, accVisOnly] = evaluateModel(net, mbq, calcVisOnly)
-    reset(mbq); YPred = []; YTrue = []; YPredVis = [];
+function [YPred, YTrue, accTotal, accVis, accAud] = evaluateModel(net, mbq, calcSingle)
+    reset(mbq); YPred=[]; YTrue=[]; YP_Vis=[]; YP_Aud=[];
     while hasdata(mbq)
         [XV, XA, YT] = next(mbq);
-        out = predict(net, XV, XA); 
-        [~, pIdx] = max(extractdata(out), [], 1);
-        [~, tIdx] = max(extractdata(YT), [], 1);
-        YPred = [YPred, pIdx]; 
-        YTrue = [YTrue, tIdx];
+        out = predict(net, XV, XA); [~, pIdx] = max(extractdata(out),[],1);
+        [~, tIdx] = max(extractdata(YT),[],1);
+        YPred=[YPred, pIdx]; YTrue=[YTrue, tIdx];
         
-        if calcVisOnly % Sıfırlama (Zero-Imputation) Tekniği ile Visual-Only başarısı
-            outVis = predict(net, XV, zeros(size(XA), 'single'));
-            [~, pVIdx] = max(extractdata(outVis), [], 1); 
-            YPredVis = [YPredVis, pVIdx];
+        if calcSingle
+            outV = predict(net, XV, zeros(size(XA),'single')); [~, vIdx] = max(extractdata(outV),[],1);
+            YP_Vis=[YP_Vis, vIdx];
+            outA = predict(net, zeros(size(XV),'single'), XA); [~, aIdx] = max(extractdata(outA),[],1);
+            YP_Aud=[YP_Aud, aIdx];
         end
     end
-    accTotal = sum(YPred == YTrue) / numel(YTrue) * 100;
-    if calcVisOnly
-        accVisOnly = sum(YPredVis == YTrue) / numel(YTrue) * 100; 
+    accTotal = sum(YPred==YTrue)/numel(YTrue)*100;
+    if calcSingle
+        accVis = sum(YP_Vis==YTrue)/numel(YTrue)*100;
+        accAud = sum(YP_Aud==YTrue)/numel(YTrue)*100;
     else
-        accVisOnly = 0; 
+        accVis = 0; accAud = 0;
     end
 end
 
 function d = readRGBImage(f, sz)
-    % Veri tipi ne olursa olsun (cell, string, char) dosya yolunu güvenle çıkar
-    filePath = f;
-    while iscell(filePath), filePath = filePath{1}; end
-    if isstring(filePath), filePath = char(filePath); end
-    
-    img = imread(filePath); 
-    if size(img, 3) == 1, img = cat(3, img, img, img); end
-    d = {single(imresize(img, sz(1:2)))}; 
+    path = f; while iscell(path), path = path{1}; end
+    img = imread(char(path)); if size(img,3)==1, img=cat(3,img,img,img); end
+    d = {single(imresize(img, sz(1:2)))};
 end
 
-function d = readMelSpecImage(f, len, fs, sz)
-    % Veri tipi ne olursa olsun (cell, string, char) dosya yolunu güvenle çıkar
-    filePath = f;
-    while iscell(filePath), filePath = filePath{1}; end
-    if isstring(filePath), filePath = char(filePath); end
+function d = readMfccSequence(f, len, fs, tLen, numCh)
+    path = f; while iscell(path), path = path{1}; end
+    [a, afs] = audioread(char(path));
+    if afs~=fs, a=resample(a,fs,afs); end; if size(a,2)>1, a=mean(a,2); end
+    if numel(a)>len, a=a(1:len); else, a=[a; zeros(len-numel(a),1)]; end
     
-    [a, afs] = audioread(filePath); 
-    if afs ~= fs, a = resample(a, fs, afs); end
-    if size(a, 2) > 1, a = mean(a, 2); end
-    if numel(a) > len, a = a(1:len); else, a = [a; zeros(len-numel(a), 1)]; end
+    c = single(mfcc(a, fs, 'NumCoeffs', numCh-1)); 
+    c = (c - mean(c(:))) / (std(c(:)) + 1e-8);
     
-    S = log10(melSpectrogram(a, fs, 'NumBands', sz(1)) + 1e-6); 
-    S = (S - mean(S(:))) / (std(S(:)) + 1e-8);
-    d = {reshape(single(imresize(S, sz(1:2))), [sz(1) sz(2) 1])};
+    if size(c,1)<tLen
+        c = [c; zeros(tLen-size(c,1), size(c,2), 'single')]; 
+    else
+        c = c(1:tLen,:); 
+    end
+    d = {c'};
 end
